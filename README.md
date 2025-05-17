@@ -21,9 +21,9 @@ __genomic.fna:__ Reference genome sequence.
 __genomic.gtf:__ Gene annotation file.  
 __peak.bed:__ Chromatin accessible regions (peaks) obtained from ATAC-seq experiments.  
 ## Output Results
-__result/gene2peak.links: __Predicted associations between genes and peaks.  
-__result/motif/filter_meme.txt:__ Motif analysis result file.  
-__result/predict_OCR/:__ Predicted chromatin accessible region files, corresponding to different samples or conditions.  
+__result/gene2peak.links:__ Predicted associations between genes and peaks.   
+__result/motif/filter_meme.txt:__ Motif analysis result file.    
+__result/predict_OCR/:__ Predicted chromatin accessible region files, corresponding to different samples or conditions.    
 # Usage Instructions
 ## Clone the repository:
 
