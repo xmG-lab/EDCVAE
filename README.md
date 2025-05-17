@@ -27,8 +27,11 @@ result/predict_OCR/: Predicted chromatin accessible region files, corresponding 
 # Usage Instructions
 ## Clone the repository:
 
-`<git clone https://github.com/xmG-lab/EDCVAE.git  
-cd EDCVAE>`  
+```
+git clone https://github.com/xmG-lab/EDCVAE.git    
+cd EDCVAE
+
+```
 ## Create and activate the Conda virtual environment, and install dependencies:
 conda create -n edcvae_env python=3.10.14  
 conda activate edcvae_env  
