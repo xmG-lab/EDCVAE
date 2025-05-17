@@ -1,40 +1,8 @@
 # EDCVAE
 EDCVAE (Epigenomic Deep Chromatin Variational AutoEncoder) is a deep learning-based model designed to integrate single-cell RNA-seq and ATAC-seq data, leveraging the DNA-BERT2 pretrained model to predict and analyze cis-regulatory regions in Arabidopsis thaliana. The project combines multimodal data processing, deep learning modeling, and bioinformatics analysis, providing a comprehensive workflow from data preprocessing to result visualization.
-EDCVAE/  
-├── data_examples/           # Example data  
-│   ├── atac-pp.h5ad  
-│   ├── atac_expression.csv
-│   ├── atac_expression.h5ad
-│   ├── rna-pp.h5ad
-│   ├── rna_expression.csv
-│   └── rna_expression.h5ad
-├── result/                  # Model prediction results
-│   ├── gene2peak.links
-│   ├── motif/
-│   │   └── filter_meme.txt
-│   └── predict_OCR/
-│       ├── OCR_A.tha.txt
-│       ├── OCR_O.sat.txt
-│       ├── OCR_P.tri.txt
-│       └── OCR_Z.may.txt
-├── src/                     # Source code
-│   ├── VAE_emb.py
-│   ├── data_atac.py
-│   ├── data_preprocess.py
-│   ├── data_rna.py
-│   ├── guidance_hvf.py
-│   ├── model_OCR.py
-│   ├── motif.py
-│   └── regulatory_inference.py
-├── genomic.fna              # Arabidopsis reference genome sequence
-├── genomic.gtf              # Arabidopsis gene annotation file
-├── peak.bed                 # Chromatin accessible regions (ATAC-seq peaks)
-├── tracks.ini               # Configuration file for cis-regulatory region inference
-├── .gitattributes           # Git LFS configuration file
-└── README.md                # Project documentation
 # Dependencies
 This project is based on the Ubuntu Linux operating system and uses Conda for virtual environment management. The core dependencies are as follows:  
-Python 3.10.14  
+_Python 3.10.14_  
 PyTorch 2.3.0（CUDA 11.8）  
 CUDA Toolkit 11.7  
 cuDNN 8.0.5  
