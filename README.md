@@ -16,33 +16,40 @@ After installing the dependencies, verify GPU availability using torch.cuda.is_a
 During the data preprocessing stage, the project utilizes the DNA-BERT2-117M pretrained model to generate embeddings for DNA sequences. DNA-BERT2 is a Transformer-based genomic foundation model that employs Byte Pair Encoding (BPE) instead of traditional k-mer tokenization, supports unlimited input lengths, and excels in multi-species genomic understanding tasks. The RNA and ATAC data in CSV format should be processed using data_rna.py and data_atac.py in the src directory.
 # Data Description
 ## Input Data
-data_examples/: Contains preprocessed single-cell RNA-seq and ATAC-seq data in .h5ad and .csv formats.  
-genomic.fna: Reference genome sequence.  
-genomic.gtf: Gene annotation file.  
-peak.bed: Chromatin accessible regions (peaks) obtained from ATAC-seq experiments.  
+__data_examples/:__ Contains preprocessed single-cell RNA-seq and ATAC-seq data in .h5ad and .csv formats.  
+__genomic.fna:__ Reference genome sequence.  
+__genomic.gtf:__ Gene annotation file.  
+__peak.bed:__ Chromatin accessible regions (peaks) obtained from ATAC-seq experiments.  
 ## Output Results
-result/gene2peak.links: Predicted associations between genes and peaks.  
-result/motif/filter_meme.txt: Motif analysis result file.  
-result/predict_OCR/: Predicted chromatin accessible region files, corresponding to different samples or conditions.  
+__result/gene2peak.links: __Predicted associations between genes and peaks.  
+__result/motif/filter_meme.txt:__ Motif analysis result file.  
+__result/predict_OCR/:__ Predicted chromatin accessible region files, corresponding to different samples or conditions.  
 # Usage Instructions
 ## Clone the repository:
 
 ```
 git clone https://github.com/xmG-lab/EDCVAE.git    
 cd EDCVAE
-
 ```
 ## Create and activate the Conda virtual environment, and install dependencies:
-conda create -n edcvae_env python=3.10.14  
-conda activate edcvae_env  
-pip install -r requirements.txt  
+```
+conda create -n edcvae_env python=3.10.14    
+conda activate edcvae_env    
+pip install -r requirements.txt
+```
 ## Run the data preprocessing script:
+```
 python src/data_preprocess.py
+```
 ## Train the model and perform predictions:
+```
 python src/model_OCR.py
+```
 ## Perform motif analysis and cis-regulatory region inference:
-python src/motif.py  
+```
+python src/motif.py    
 python src/regulatory_inference.py
+```
 # Contact
 For any questions or suggestions, please submit an issue on GitHub or contact the project maintainer:  
 Email:2042766474@qq.com  
