@@ -3,14 +3,14 @@ EDCVAE (Epigenomic Deep Chromatin Variational AutoEncoder) is a deep learning-ba
 # Dependencies
 This project is based on the Ubuntu Linux operating system and uses Conda for virtual environment management. The core dependencies are as follows:  
   __Python 3.10.14__  
-PyTorch 2.3.0（CUDA 11.8）  
-CUDA Toolkit 11.7  
-cuDNN 8.0.5  
-Transformers 4.28.1  
-scikit-learn 1.6.1  
-h5py 3.12.1  
-Biopython 1.78  
-scglue 0.3.1  
+  __PyTorch 2.3.0（CUDA 11.8）__  
+  __CUDA Toolkit 11.7__  
+  __cuDNN 8.0.5__  
+  __Transformers 4.28.1__  
+  __scikit-learn 1.6.1__  
+  __h5py 3.12.1__  
+  __Biopython 1.78__  
+  __scglue 0.3.1__  
 After installing the dependencies, verify GPU availability using torch.cuda.is_available().  
 # Data Processing
 During the data preprocessing stage, the project utilizes the DNA-BERT2-117M pretrained model to generate embeddings for DNA sequences. DNA-BERT2 is a Transformer-based genomic foundation model that employs Byte Pair Encoding (BPE) instead of traditional k-mer tokenization, supports unlimited input lengths, and excels in multi-species genomic understanding tasks. The RNA and ATAC data in CSV format should be processed using data_rna.py and data_atac.py in the src directory.
@@ -26,8 +26,9 @@ result/motif/filter_meme.txt: Motif analysis result file.
 result/predict_OCR/: Predicted chromatin accessible region files, corresponding to different samples or conditions.  
 # Usage Instructions
 ## Clone the repository:
-git clone https://github.com/xmG-lab/EDCVAE.git  
-cd EDCVAE  
+
+`<git clone https://github.com/xmG-lab/EDCVAE.git  
+cd EDCVAE>`  
 ## Create and activate the Conda virtual environment, and install dependencies:
 conda create -n edcvae_env python=3.10.14  
 conda activate edcvae_env  
