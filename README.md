@@ -2,7 +2,7 @@
 EDCVAE (Epigenomic Deep Chromatin Variational AutoEncoder) is a deep learning-based model designed to integrate single-cell RNA-seq and ATAC-seq data, leveraging the DNA-BERT2 pretrained model to predict and analyze cis-regulatory regions in Arabidopsis thaliana. The project combines multimodal data processing, deep learning modeling, and bioinformatics analysis, providing a comprehensive workflow from data preprocessing to result visualization.
 # Dependencies
 This project is based on the Ubuntu Linux operating system and uses Conda for virtual environment management. The core dependencies are as follows:  
-_Python 3.10.14_  
+  __Python 3.10.14__  
 PyTorch 2.3.0（CUDA 11.8）  
 CUDA Toolkit 11.7  
 cuDNN 8.0.5  
