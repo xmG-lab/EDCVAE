@@ -1,8 +1,8 @@
 # EDCVAE
 EDCVAE (Epigenomic Deep Chromatin Variational AutoEncoder) is a deep learning-based model designed to integrate single-cell RNA-seq and ATAC-seq data, leveraging the DNA-BERT2 pretrained model to predict and analyze cis-regulatory regions in Arabidopsis thaliana. The project combines multimodal data processing, deep learning modeling, and bioinformatics analysis, providing a comprehensive workflow from data preprocessing to result visualization.
-EDCVAE/
-├── data_examples/           # Example data
-│   ├── atac-pp.h5ad
+EDCVAE/  
+├── data_examples/           # Example data  
+│   ├── atac-pp.h5ad  
 │   ├── atac_expression.csv
 │   ├── atac_expression.h5ad
 │   ├── rna-pp.h5ad
