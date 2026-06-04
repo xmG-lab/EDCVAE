@@ -61,7 +61,7 @@ for neg_file in neg_files:
 # labels = np.array(labels)
 
 # 嵌入向量的目标形状是 (1000, 768)
-target_shape = (512, 768)
+target_shape = (500, 768)
 
 processed_data = []
 for embedding in data:
@@ -121,7 +121,7 @@ class CharPlantCNN(nn.Module):
         # self.conv1 = nn.Conv1d(in_channels=4, out_channels=args.nb_filter1, kernel_size=args.filter_len1, padding='same')
         # self.conv2 = nn.Conv1d(in_channels=args.nb_filter1, out_channels=args.nb_filter2, kernel_size=args.filter_len2, padding='same')
         self.dropout = nn.Dropout(args.dropout)
-        self.fc1 = nn.Linear(in_features=args.nb_filter2 * 512, out_features=args.hidden)
+        self.fc1 = nn.Linear(in_features=args.nb_filter2 * 500, out_features=args.hidden)
         self.fc2 = nn.Linear(in_features=args.hidden, out_features=1)
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
