@@ -1,6 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 from transformers import AutoTokenizer, AutoModel
 import torch
 import numpy as np
@@ -124,7 +124,7 @@ def generate_base_embedding(
     with torch.no_grad():
         outputs = model(**model_inputs)
 
-    token_embeddings = outputs.last_hidden_state[0].detach().cpu().numpy()
+    token_embeddings = outputs[0][0].detach().cpu().numpy()
     base_embedding = token_to_base_projection(sequence, token_embeddings, offsets)
 
     if base_embedding.shape != (len(sequence), EMBED_DIM):
