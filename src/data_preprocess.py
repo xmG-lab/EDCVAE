@@ -151,39 +151,67 @@ SeqIO.write(negative_sequences, negative_fasta, "fasta")
 print("Saved negative regions:", negative_fasta)
 
 
-# Step 2: 载入DNABERT-2模型与Tokenizer并生成正负样本NPY文件
-config = BertConfig.from_pretrained("zhihan1996/DNABERT-2-117M")
-model = BertModel.from_pretrained("zhihan1996/DNABERT-2-117M", config=config)
-tokenizer = AutoTokenizer.from_pretrained("zhihan1996/DNABERT-2-117M", trust_remote_code=True)
+# Step 5: 检查正负样本序列冲突
+print("Checking positive-negative sequence conflicts...")
+def check_positive_negative_conflicts(sequences, negative_sequences, max_attempts=10):
+    # 保存所有正样本及其reverse complement的canonical形式
+    positive_set = set()
+    for record in sequences:
+        positive_set.add(canonical(str(record.seq)))
+    filtered_sequences = []
+    filtered_negative_sequences = []
+    conflict_count = 0
+    regenerated_count = 0
+    removed_count = 0
+    
+    for pos_record, neg_record in zip(sequences, negative_sequences):
+        negative_sequence = str(neg_record.seq)
+        attempt = 0
+        # 如果负样本与任意正样本相同或互为reverse complement，则重新进行dinucleotide shuffle
+        while (
+            canonical(negative_sequence) in positive_set and attempt < max_attempts):
+            negative_sequence = dinucleotide_shuffle(str(pos_record.seq))
+            attempt += 1
+        # 记录发生过冲突并成功重新生成的样本
+        if attempt > 0:
+            conflict_count += 1
+        # 多次重新shuffle后仍然存在冲突，则删除整个正负样本对
+        if canonical(negative_sequence) in positive_set:
+            removed_count += 1
+            continue
+        if attempt > 0:
+            regenerated_count += 1
+        filtered_sequences.append(pos_record)
+        filtered_negative_sequences.append(SeqRecord(Seq(negative_sequence), id=neg_record.id, description=""))
 
-output_dir = os.path.join(args.out_dir, "embeddings")
-os.makedirs(output_dir, exist_ok=True)
+    print("Detected conflicts:", conflict_count)
+    print("Successfully regenerated negatives:", regenerated_count)
+    print("Removed positive-negative pairs:", removed_count)
+    return (filtered_sequences, filtered_negative_sequences)
+sequences, negative_sequences = check_positive_negative_conflicts(sequences,negative_sequences)
 
-def generate_negative_sample(dna_sequence):
-    dna_list = list(dna_sequence)
-    random.shuffle(dna_list)
-    return "".join(dna_list)
+print("Final positive samples:", len(sequences))
+print("Final negative samples:", len(negative_sequences))
 
-print("Processing sequences and generating embeddings...")
-for record in SeqIO.parse(fasta_output, "fasta"):
-    dna_sequence = str(record.seq)
-    record_id = record.id.replace(":", "_").replace("-", "_")
+# Step 6:创建dataset
+dataset=[]
+for pos,neg in zip(sequences, negative_sequences):
+    dataset.append({"id":"pos_"+pos.id, "sequence":str(pos.seq)})
+    dataset.append({"id":"neg_"+neg.id, "sequence":str(neg.seq)})
 
-    # 正样本编码
-    inputs = tokenizer(dna_sequence, return_tensors='pt', padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        hidden_states = model(**inputs)[0]
-    pos_filename = os.path.join(output_dir, f"pos_{record_id}.npy")
-    np.save(pos_filename, hidden_states[0].numpy())
+# Step 7:载入DNABERT-2
 
-    # 负样本编码
-    negative_sample = generate_negative_sample(dna_sequence)
-    inputs_neg = tokenizer(negative_sample, return_tensors='pt', padding=True, truncation=True, max_length=512)
-    with torch.no_grad():
-        hidden_states_neg = model(**inputs_neg)[0]
-    neg_filename = os.path.join(output_dir, f"neg_{record_id}.npy")
-    np.save(neg_filename, hidden_states_neg[0].numpy())
+print("Loading DNABERT-2...")
+tokenizer, model, device = load_dnabert2()
 
-    print(f"Saved positive sample to {pos_filename} and negative sample to {neg_filename}")
+# Step 8:生成正负样本npy
 
+print("Generating embeddings...")
+for row in dataset:
+    embedding = generate_base_embedding(row["sequence"], tokenizer, model, device)
+    if embedding.shape != (500,768):
+        raise RuntimeError(f"Unexpected embedding shape: {embedding.shape}")
+    save_embedding(os.path.join(embedding_dir, row["id"].replace(":", "_")+".npy"), embedding)
 print("Preprocessing completed.")
+
+
