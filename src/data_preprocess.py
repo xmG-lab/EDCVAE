@@ -15,12 +15,29 @@ parser = argparse.ArgumentParser(description="Extract open chromatin regions and
 parser.add_argument("--genome", "-g", required=False, default="genomic.fna", help="参考基因组FASTA文件")
 parser.add_argument("--bed", "-b", required=False, default="peak.bed", help="染色质开放区BED文件")
 parser.add_argument("--out_dir", "-o", default="data_preprocess", help="输出目录")
+parser.add_argument("--repeat", "-r", default=None, help="重复序列区域BED文件；不提供则跳过repeat filtering")
 args = parser.parse_args()
 
 # 创建输出目录
 os.makedirs(args.out_dir, exist_ok=True)
 embedding_dir=os.path.join(args.out_dir, "embeddings")
 os.makedirs(embedding_dir, exist_ok=True)
+existing_embeddings = [
+    f for f in os.listdir(embedding_dir)
+    if f.endswith(".npy")
+    and (
+        f.startswith("pos_")
+        or f.startswith("neg_")
+    )
+]
+
+if existing_embeddings:
+    raise RuntimeError(
+        f"{embedding_dir} already contains "
+        f"{len(existing_embeddings)} embedding files. "
+        "Please use a new output directory or remove "
+        "the old embeddings before preprocessing."
+    )
 
 # 参数设置
 WINDOW_SIZE = 500
@@ -47,7 +64,6 @@ with open(args.bed, "r") as f:
         start, end = int(start), int(end)
         if chrom not in genome:
             continue
-    
         center=(start+end)//2
         window_start=center-WINDOW_SIZE//2
         window_end=center+WINDOW_SIZE//2
@@ -56,13 +72,19 @@ with open(args.bed, "r") as f:
         if window_end > len(genome[chrom]):
             continue
         seq = genome[chrom][window_start:window_end]
-           if len(seq) >= 30:  # DNABERT最小K-mer要求
-               sequences.append(SeqRecord(Seq(seq), id=f"{chrom}_{start}_{end}", description=""))
-        if len(seq)!=WINDOW_SIZE:
+           # 必须严格保证输入窗口为500 bp
+        if len(seq) != WINDOW_SIZE:
             continue
-print("sequences:",len(seq))
-
-
+        if set(seq) - DNA_ALPHABET:
+            continue
+        # 保存peak及实际500-bp窗口坐标
+        record.annotations["chrom"] = chrom
+        record.annotations["peak_start"] = start
+        record.annotations["peak_end"] = end
+        record.annotations["window_start"] = window_start
+        record.annotations["window_end"] = window_end
+        sequences.append(record)
+print("sequences:", len(sequences))
 fasta_output = os.path.join(args.out_dir, "open_regions.fa")
 SeqIO.write(sequences, fasta_output, "fasta")
 print(f"Saved open regions to {fasta_output}")
@@ -71,15 +93,20 @@ print(f"Saved open regions to {fasta_output}")
 if args.repeat is not None:
     print( "Loading repeat regions..." )
     repeat_regions={}
-    with open(args.repeat,"r") as f:
+    with open(args.repeat, "r") as f:
         for line in f:
-            chrom,start,end=line.strip().split()[:3]
-            start=int(start)
-            end=int(end)
+            if line.startswith("#"):
+                continue
+            if not line.strip():
+                continue
+            chrom, start, end = line.strip().split()[:3]
+            start = int(start)
+            end = int(end)
             if chrom not in repeat_regions:
-                repeat_regions[chrom]=[]
-            repeat_regions[chrom].append( (start, end) )
-
+                repeat_regions[chrom] = []
+            repeat_regions[chrom].append((start, end))
+    for chrom in repeat_regions:
+        repeat_regions[chrom].sort(key=lambda x: x[0])
     def repeat_fraction(chrom, start, end):
         if chrom not in repeat_regions:
             return 0
@@ -92,16 +119,11 @@ if args.repeat is not None:
             overlap += max(0, min(end,r2)-max(start,r1))
         return overlap/(end-start)
     filtered=[]
-    for item in positive_sequences:
-        if repeat_fraction(
-            item["chrom"],
-            item["start"],
-            item["end"]
-        ) <= MAX_REPEAT_FRACTION:
+    for item in sequences:
+        if repeat_fraction(item.annotations["chrom"], item.annotations["window_start"], item.annotations["window_end"]) <= MAX_REPEAT_FRACTION:
             filtered.append(item)
-    sequences=filtered
+    sequences = filtered
 print("After repeat filtering:", len(sequences))
-
 # Step 3: 去除完全重复和reverse complement重复
 print("Removing duplicate sequences...")
 def canonical(seq):
@@ -110,16 +132,16 @@ def canonical(seq):
 seen=set()
 unique=[]
 for item in sequences:
-    key=canonical(item["sequence"])
+    key=canonical(str(item.seq))
     if key in seen:
         continue
     seen.add(key)
     unique.append(item)
 sequences=unique
-print("After duplicate removal:", len(sequences)
-)
+print("After duplicate removal:", len(sequences))
+
 # 重新保存最终fasta output
-SeqIO.write([SeqRecord(Seq(x["sequence"]), id=x["id"],description="") for x in positive_sequences], fasta_output, "fasta")
+SeqIO.write(sequences, fasta_output, "fasta")
 
 # Step 4: 生成dinucleotide shuffled negative
 print("Generating dinucleotide shuffled negatives...")
@@ -147,9 +169,6 @@ negative_sequences=[]
 for record in sequences:
     negative_sequences.append(SeqRecord(Seq(dinucleotide_shuffle(str(record.seq))), id=record.id, description=""))
 negative_fasta=os.path.join(args.out_dir, "negative_regions.fa")
-SeqIO.write(negative_sequences, negative_fasta, "fasta")
-print("Saved negative regions:", negative_fasta)
-
 
 # Step 5: 检查正负样本序列冲突
 print("Checking positive-negative sequence conflicts...")
@@ -192,6 +211,8 @@ sequences, negative_sequences = check_positive_negative_conflicts(sequences,nega
 
 print("Final positive samples:", len(sequences))
 print("Final negative samples:", len(negative_sequences))
+SeqIO.write(negative_sequences, negative_fasta, "fasta")
+print("Saved final negative regions:", negative_fasta)
 
 # Step 6:创建dataset
 dataset=[]
@@ -213,5 +234,3 @@ for row in dataset:
         raise RuntimeError(f"Unexpected embedding shape: {embedding.shape}")
     save_embedding(os.path.join(embedding_dir, row["id"].replace(":", "_")+".npy"), embedding)
 print("Preprocessing completed.")
-
-
