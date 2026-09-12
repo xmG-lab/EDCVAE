@@ -1,84 +1,830 @@
 import os
 import argparse
-import time
+import copy
+import csv
+import json
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import roc_curve, auc
 import pyfiglet
 import matplotlib.pyplot as plt
 
-# Argument parsing
-parser = argparse.ArgumentParser(description="Training Charplant CNN model")
-parser.add_argument("--epochs", "-e", default=150, type=int, required=False,
-                    help="Number of epochs. (default is 150)")
-parser.add_argument("--patience", "-p", default=150, type=int, required=False,
-                    help='Number of epochs for early stopping. (default is 20)')
-parser.add_argument("--learningrate", "-lr", default=0.001, type=float, required=False,
-                   help='Learning rate. (default is 0.001)')
-parser.add_argument("--batch_size", "-b", default=28, type=int, required=False,
-                    help="Batch Size. (default is 128)")
-parser.add_argument("--dropout", "-d", default=0.6, type=float, required=False,
-                    help="Dropout rate. (default is 0.6)")
-parser.add_argument("--nb_filter1", "-n1", default=200, type=int, required=False,
-                    help="Number of filters in first layer of convolution. (default is 200)")
-parser.add_argument("--nb_filter2", "-n2", default=100, type=int, required=False,
-                    help="Number of filters in second layer of convolution. (default is 100)")
-parser.add_argument("--filter_len1", "-fl1", default=19, type=int, required=False,
-                    help="Length of filters in first layer of convolution. (default is 19)")
-parser.add_argument("--filter_len2", "-fl2", default=11, type=int, required=False,
-                    help="Length of filters in second layer of convolution. (default is 11)")
-parser.add_argument("--hidden", "-hd", default=200, type=int, required=False,
-                    help="Units in the fully connected layer. (default is 200)")
-args = parser.parse_args()
+from sklearn.metrics import (accuracy_score, average_precision_score, f1_score, matthews_corrcoef, precision_score, recall_score, roc_auc_score,)
+from sklearn.model_selection import StratifiedGroupKFold
+from torch.utils.data import DataLoader, Dataset
 
-# Device configuration
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# Step 0: Fixed input dimension
+SEQ_LEN = 500
+EMBED_DIM = 768
+N_SPLITS = 5
 
-# Load data from 'data' folder
-print("loading data from 'data' folder...")
-data_dir = '/data/gxmst/Finally/DNAbert2+CNN/data_preprocess/embeddings'
-pos_files = [f for f in os.listdir(data_dir) if f.startswith('pos_')]
-neg_files = [f for f in os.listdir(data_dir) if f.startswith('neg_')]
+# Step 1: 参数解析
+def parse_arguments():
+    parser = argparse.ArgumentParser( description="Training CharPlant CNN model")
+    parser.add_argument("--data_dir", "--data-dir", dest="data_dir", default="data_preprocess/embeddings", help="Directory containing pos_*.npy and neg_*.npy embeddings.")
+    parser.add_argument("--output_dir", "--output-dir", dest="output_dir", default="ocr_cv_results", help="Directory used to save cross-validation results.")
+    parser.add_argument("-e", default=150, type=int, required=False, help="Number of epochs. (default: 150)")
+    parser.add_argument("--patience", "-p", default=20, type=int, required=False, help="Number of epochs for early stopping. (default: 20)")
+    parser.add_argument("--learningrate", "-lr", default=0.001, type=float, required=False, help="Learning rate. (default: 0.001)")
+    parser.add_argument("--batch_size", "--batch-size", "-b", dest="batch_size", default=28, type=int, required=False, help="Batch size. (default: 28)")
+    parser.add_argument("--dropout", "-d", default=0.6, type=float, required=False, help="Dropout rate. (default: 0.6)")
+    parser.add_argument("--nb_filter1", "--nb-filter1", "-n1", dest="nb_filter1", default=200, type=int, required=False, help="Number of filters in first convolution layer. (default: 200)")
+    parser.add_argument("--nb_filter2", "--nb-filter2", "-n2", dest="nb_filter2", default=100, type=int, required=False, help="Number of filters in second convolution layer. (default: 100)")
+    parser.add_argument("--filter_len1", "--filter-len1", "-fl1", dest="filter_len1", default=19, type=int, required=False, help="Kernel size of first convolution layer. (default: 19)")
+    parser.add_argument("--filter_len2", "--filter-len2", "-fl2", dest="filter_len2", default=11, type=int, required=False, help="Kernel size of second convolution layer. (default: 11)")
+    parser.add_argument( "--hidden", "-hd", default=200, type=int, required=False, help="Units in fully connected layer. (default: 200)")
+    args = parser.parse_args()
+  
+#Step 2: Device configuration 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print( "Using device:", device)
 
-# Load embeddings and labels
-data = []
-labels = []
+#Step 3: Load embeddings generated by preprocessing
+print("Loading embeddings...")
+data_dir = Path(args.data_dir)
+if not data_dir.exists():
+    raise FileNotFoundError(f"Embedding directory not found: {data_dir}")
+pos_files = sorted(data_dir.glob("pos_*.npy"))
+neg_files = sorted(data_dir.glob("neg_*.npy"))
+print("Positive embeddings:", len(pos_files))
+print("Negative embeddings:", len(neg_files))
+if len(pos_files)==0:
+    raise RuntimeError("No positive embeddings found.")
+if len(neg_files)==0:
+    raise RuntimeError("No negative embeddings found.")
+# Recover paired group IDs
+pos_map = {}
+for file in pos_files:
+    group_id = file.stem.replace("pos_", "")
+    pos_map[group_id] = file
+neg_map = {}
+for file in neg_files:
+    group_id = file.stem.replace( "neg_", "")
+    neg_map[group_id] = file
 
-for pos_file in pos_files:
-    pos_data = np.load(os.path.join(data_dir, pos_file))
-    data.append(pos_data)
-    labels.append(1)  # Positive sample label
+if set(pos_map.keys()) != set(neg_map.keys()):
+    missing_negative = (
+        set(pos_map.keys())
+        -
+        set(neg_map.keys())
+    )
+    missing_positive = (
+        set(neg_map.keys())
+        -
+        set(pos_map.keys())
+    )
+    raise RuntimeError(
+        f"Pair mismatch.\n"
+        f"Missing negative: {missing_negative}\n"
+        f"Missing positive: {missing_positive}"
+    )
 
-for neg_file in neg_files:
-    neg_data = np.load(os.path.join(data_dir, neg_file))
-    data.append(neg_data)
-    labels.append(0)  # Negative sample label
+# Build sample table
+samples = []
+for group_id in sorted(pos_map.keys()):
+    samples.append({"sample_id": "pos_" + group_id, "group_id": group_id, "label": 1, "path": pos_map[group_id]})
+    samples.append({"sample_id": "neg_" + group_id, "group_id": group_id, "label": 0, "path": neg_map[group_id]})
+labels = np.array([x["label"] for x in samples], dtype=np.int64)
+groups = np.array([x["group_id"] for x in samples])
+print("Total samples:", len(samples))
+print("Unique groups:", len(np.unique(groups)))
 
-# data = np.array(data)
-# labels = np.array(labels)
+# Step 4: Dataset and DataLoader
+class EmbeddingDataset(Dataset):
+    def __init__(self, samples, indices):
+        self.samples = samples
+        self.indices = np.asarray(indices, dtype=np.int64)
+    def __len__(self):
+        return len(self.indices)
+    def __getitem__(self, index):
+        sample_index = int(self.indices[index])
+        sample = self.samples[sample_index]    
+        embedding = np.load(sample["path"], allow_pickle=False)
+        embedding = np.asarray(embedding, dtype=np.float32)
+        if embedding.shape != (
+            SEQ_LEN,
+            EMBED_DIM
+        ):
+            raise ValueError(
+                f"Embedding shape error:\n"
+                f"sample = {sample['sample_id']}\n"
+                f"path = {sample['path']}\n"
+                f"shape = {embedding.shape}\n"
+                f"expected = {(SEQ_LEN, EMBED_DIM)}"
+            )
+        data = torch.from_numpy(embedding)      
+        # Binary label positive = 1 negative = 0
+        label = torch.tensor(sample["label"], dtype=torch.float32)
+        return (data, label)
+# Create DataLoader
+def create_loader(indices, shuffle=False):
+    dataset = EmbeddingDataset(samples=samples, indices=indices)
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=shuffle, pin_memory=(device.type == "cuda"))
+    return loader
+  
+# Step 5: Define CharPlantCNN
+class CharPlantCNN(nn.Module):
+    def __init__(self):
+        super(CharPlantCNN, self).__init__()
+        self.conv1 = nn.Conv1d(in_channels=EMBED_DIM, out_channels=args.nb_filter1, kernel_size=args.filter_len1, padding=args.filter_len1 // 2)
+        self.conv2 = nn.Conv1d(in_channels=args.nb_filter1, out_channels=args.nb_filter2, kernel_size=args.filter_len2, padding=args.filter_len2 // 2)
+        self.dropout = nn.Dropout(args.dropout)
+        self.fc1 = nn.Linear(in_features=args.nb_filter2 * SEQ_LEN, out_features=args.hidden)
+        self.fc2 = nn.Linear(in_features=args.hidden, out_features=1)
+        self.relu = nn.ReLU()
+    def forward(self, x):
+        if (x.ndim != 3 or x.shape[1] != SEQ_LEN or x.shape[2] != EMBED_DIM):
+            raise ValueError(
+                f"Model input shape error: "
+                f"{tuple(x.shape)}; "
+                f"expected "
+                f"[batch, {SEQ_LEN}, {EMBED_DIM}]"
+            )
+        x = x.transpose(1, 2)
+        x = self.conv1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.conv2(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = x.reshape(x.size(0), -1)
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x.squeeze(dim=1)
 
-# 嵌入向量的目标形状是 (1000, 768)
-target_shape = (500, 768)
+# Step 6:Loss function
+criterion = nn.BCEWithLogitsLoss()
+# Prediction and validation
+def evaluate_model(model, data_loader):
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    true_labels = []
+    prediction_scores = []
+    with torch.no_grad():
+        for (data, label) in data_loader:
+            data = data.to(device, non_blocking=True)
+            label = label.to(device, non_blocking=True)
+            logits = model(data)
+            loss = criterion(logits, label)
+            batch_size = label.size(0)
+            total_loss += (loss.item() * batch_size)
+            total_samples += (batch_size)
+            true_labels.append(label.detach().cpu().numpy())
+            probability = torch.sigmoid(logits)
+            prediction_scores.append(probability.detach().cpu().numpy())
+# Check whether DataLoader is empty
+    if total_samples == 0:
+      raise RuntimeError("Evaluation DataLoader is empty.")
+    mean_loss = (total_loss / total_samples)
+    true_labels = np.concatenate(true_labels)
+    prediction_scores = np.concatenate(prediction_scores)
+    return (float(mean_loss), true_labels, prediction_scores)
 
-processed_data = []
-for embedding in data:
-    if embedding.shape[0] < target_shape[0]:
-        # 如果嵌入向量较短，使用零填充
-        padding = target_shape[0] - embedding.shape[0]
-        # 使用 np.pad 在第一个维度上进行零填充
-        embedding = np.pad(embedding, ((0, padding), (0, 0)), mode='constant')
-    elif embedding.shape[0] > target_shape[0]:
-        # 如果嵌入向量较长，进行截断
-        embedding = embedding[:target_shape[0], :]
+# Select threshold
+def select_threshold(true_labels, prediction_scores):
+    # Threshold is selected ONLY using validation data.Test labels must never be used here.
+    # Optimization criterion:maximum F1 score
+    candidate_thresholds = np.unique(np.concatenate([np.array([0.0]), prediction_scores, np.array([1.0]]))
+    best_threshold = 0.5
+    best_f1 = -1.0
+    for threshold in candidate_thresholds:
+        predictions = (prediction_scores >= threshold).astype(np.int64)
+        current_f1 = f1_score(true_labels, predictions, zero_division=0)
+        if current_f1 > best_f1:
+            best_f1 = float(current_f1)
+            best_threshold = float(threshold) 
+        elif (current_f1 == best_f1 and threshold < best_threshold):
+            best_threshold = float(threshold)
+    return best_threshold
+# Calculate evaluation metrics
+def calculate_metrics(true_labels, prediction_scores, threshold):
+    predictions = (prediction_scores >= threshold).astype(np.int64)
+    unique_labels = np.unique(true_labels)
+    if len(unique_labels) != 2:
+        raise RuntimeError(
+            "Evaluation set must contain both "
+            "positive and negative samples. "
+            f"Current labels: {unique_labels}"
+        )
+    accuracy = accuracy_score(true_labels, predictions)
+    precision = precision_score(true_labels, predictions, zero_division=0)
+    recall = recall_score(true_labels, predictions, zero_division=0)
+    f1 = f1_score(true_labels, predictions, zero_division=0)
+    mcc = matthews_corrcoef(true_labels, predictions)
+    auroc = roc_auc_score(true_labels, prediction_scores)
+    auprc = average_precision_score(true_labels, prediction_scores)
+    metrics = {"accuracy":float(accuracy), "precision":float(precision), "recall":float(recall), "f1":float(f1), "mcc":float(mcc), "auroc":float(auroc), "auprc":float(auprc)}
+    return metrics
+def check_group_leakage(index_a, index_b, name_a, name_b):
+    group_a = set(groups[index_a])
+    group_b = set(groups[index_b])
+    overlap = (group_a & group_b)
+
+    if len(overlap) > 0:
+        raise RuntimeError(
+            f"Group leakage detected "
+            f"between {name_a} and {name_b}.\n"
+            f"Overlapping groups: "
+            f"{sorted(overlap)[:10]}"
+        )
+def print_split_information(split_name, indices):
+    split_labels = labels[indices]
+    split_groups = groups[indices]
+    positive_number = int(np.sum(split_labels == 1))
+    negative_number = int(np.sum(split_labels == 0))
+    group_number = len(np.unique(split_groups))
+    print(
+        f"{split_name}: "
+        f"samples={len(indices)}, "
+        f"groups={group_number}, "
+        f"positive={positive_number}, "
+        f"negative={negative_number}"
+    )
+def train_model_with_validation(train_idx, val_idx, inner_fold):
+    check_group_leakage(train_idx, val_idx, "inner-train", "inner-validation")
+    train_loader = create_loader(train_idx, shuffle=True)
+    val_loader = create_loader(val_idx, shuffle=False)
+    model = CharPlantCNN().to(device)
+    optimizer = optim.SGD(model.parameters(), lr=args.learningrate,momentum=0.9, weight_decay=1e-5)
+    best_val_loss = float("inf")
+    best_state = None
+    best_epoch = 0
+    patience_counter = 0
+    history = []
+    for epoch in range(1, args.epochs + 1):
+        model.train()
+        train_loss_sum = 0.0
+        train_correct = 0
+        train_samples = 0
+        for (data, label) in train_loader:
+            data = data.to(device, non_blocking=True)
+            label = label.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(data)
+            loss = criterion(logits, label)
+            loss.backward()
+            optimizer.step()
+            batch_size = label.size(0)
+            train_loss_sum += (loss.item() * batch_size)
+            train_samples += (batch_size)      
+            train_predictions = (logits >= 0).float()
+            train_correct += (train_predictions == label).sum().item()
+        train_loss = (train_loss_sum / train_samples)
+        train_accuracy = (train_correct / train_samples)
+        (val_loss, val_labels, val_scores) = evaluate_model(model, val_loader)
+        val_predictions_05 = (val_scores >= 0.5).astype(np.int64)
+        val_accuracy_05 = (accuracy_score(val_labels, val_predictions_05))
+        history.append({"epoch":int(epoch), "train_loss":float(train_loss), "train_accuracy":float(train_accuracy), "val_loss":float(val_loss), "val_accuracy_0.5":float(val_accuracy_05)})
+        print(f"Inner fold {inner_fold} | "
+            f"Epoch "
+            f"{epoch:03d}/"
+            f"{args.epochs} | "
+            f"train_loss="
+            f"{train_loss:.6f} | "
+            f"train_acc="
+            f"{train_accuracy:.4f} | "
+            f"val_loss="
+            f"{val_loss:.6f} | "
+            f"val_acc@0.5="
+            f"{val_accuracy_05:.4f}"
+        )    
+        if (val_loss < best_val_loss - 1e-8):
+            best_val_loss = float(val_loss)
+            best_epoch = int(epoch)
+            best_state = copy.deepcopy(model.state_dict())
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if (patience_counter >= args.patience):
+                print(
+                    f"Inner fold {inner_fold}: "
+                    f"early stopping at "
+                    f"epoch {epoch}; "
+                    f"best epoch = "
+                    f"{best_epoch}, "
+                    f"best val loss = "
+                    f"{best_val_loss:.6f}"
+                )
+                break
+
+    if best_state is None:
+        raise RuntimeError(
+            f"Inner fold {inner_fold}: "
+            f"no best model was recorded."
+        )
+
+    model.load_state_dict(best_state)
+    (best_val_loss_check, val_labels, val_scores) = evaluate_model(model, val_loader)
+    return {"model":model, "best_epoch":best_epoch, "best_val_loss":float(best_val_loss_check), "val_labels":val_labels, "val_scores":val_scores, "history": history}
+
+# Train final model using the complete outer-training set
+def train_final_model(outer_train_idx, final_epochs):
+    train_loader = create_loader(outer_train_idx, shuffle=True)
+    model = CharPlantCNN().to(device)
+    optimizer = optim.SGD(model.parameters(), lr=args.learningrate, momentum=0.9, weight_decay=1e-5)
+    final_history = []
+    for epoch in range(1, final_epochs + 1):
+        model.train()
+        train_loss_sum = 0.0
+        train_correct = 0
+        train_samples = 0
+        for (data, label) in train_loader:
+            data = data.to(device, non_blocking=True)
+            label = label.to(device, non_blocking=True)
+            optimizer.zero_grad(set_to_none=True)
+            logits = model(data)
+            loss = criterion(logits, label)
+            loss.backward()
+            optimizer.step()
+            batch_size = label.size(0)
+            train_loss_sum += (loss.item() * batch_size)
+            train_samples += (
+                batch_size
+            )
+            predictions = (logits >= 0).float()
+            train_correct += (predictions == label).sum().item()
+        train_loss = (train_loss_sum / train_samples)
+        train_accuracy = (train_correct / train_samples)
+        final_history.append({"epoch":int(epoch), "train_loss":float(train_loss), "train_accuracy":float(train_accuracy)})
+        print(f"Final training | "
+            f"Epoch "
+            f"{epoch:03d}/"
+            f"{final_epochs} | "
+            f"train_loss="
+            f"{train_loss:.6f} | "
+            f"train_acc="
+            f"{train_accuracy:.4f}"
+        )
+    return (model, final_history)
+def train_one_fold(fold, outer_train_idx, outer_test_idx):
+    print("\n" "============================================================")
+    print(f"Outer Fold " f"{fold}/" f"{N_FOLDS}")
+    print("============================================================")
+    check_group_leakage(outer_train_idx, outer_test_idx, "outer-train", "outer-test")
+    print_split_information("Outer train", outer_train_idx)
+    print_split_information("Outer test", outer_test_idx)
+
+    outer_train_labels = labels[outer_train_idx]
+    outer_train_groups = groups[outer_train_idx]
+    number_outer_train_groups = len(np.unique(outer_train_groups))
+    if number_outer_train_groups < N_FOLDS:
+        raise RuntimeError(
+            f"Outer fold {fold}: "
+            f"only "
+            f"{number_outer_train_groups} "
+            f"training groups are available. "
+            f"At least {N_FOLDS} groups "
+            f"are required for inner "
+            f"{N_FOLDS}-fold CV."
+        )
+    inner_splitter = StratifiedGroupKFold(n_splits= N_FOLDS, shuffle=False)
+    inner_oof_scores = np.full(len(outer_train_idx), np.nan, dtype=np.float64)
+    inner_oof_labels = (outer_train_labels.copy())
+    inner_best_epochs = []
+    inner_fold_information = []
+
+    for (inner_fold, (inner_train_relative_idx, inner_val_relative_idx)) in enumerate(inner_splitter.split(np.zeros(len(outer_train_idx)), outer_train_labels,outer_train_groups), start=1):
+        print("\n" f"----- " f"Outer Fold {fold} | " f"Inner Fold " f"{inner_fold}/" f"{N_FOLDS} " f"-----")
+        inner_train_idx = outer_train_idx[inner_train_relative_idx]
+        inner_val_idx = outer_train_idx[inner_val_relative_idx]
+
+        check_group_leakage(inner_train_idx, inner_val_idx, "inner-train", "inner-validation")
+        check_group_leakage(inner_train_idx, outer_test_idx, "inner-train", "outer-test")
+        check_group_leakage(inner_val_idx, outer_test_idx, "inner-validation", "outer-test")
+        print_split_information("Inner train", inner_train_idx)
+        print_split_information("Inner validation", inner_val_idx)
+        inner_result = (train_model_with_validation(train_idx=inner_train_idx, val_idx=inner_val_idx, inner_fold=inner_fold))
+        inner_oof_scores[inner_val_relative_idx] = inner_result["val_scores"]
+        inner_best_epochs.append(inner_result["best_epoch"])
+        inner_fold_information.append({"inner_fold":int(inner_fold), "best_epoch":int(inner_result["best_epoch"]),"best_val_loss":
+                    float(inner_result["best_val_loss"]),
+                "n_train":int(len(inner_train_idx)),
+                "n_validation":int(len(inner_val_idx)),
+                "history":inner_result["history"]})
+        del inner_result
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+    if np.isnan(inner_oof_scores).any():
+        raise RuntimeError(
+            f"Outer fold {fold}: "
+            f"some inner OOF predictions "
+            f"were not generated."
+        )
+    threshold = select_threshold(inner_oof_labels, inner_oof_scores)
+    print(
+        "\n"
+        f"Outer Fold {fold}: "
+        f"selected threshold = "
+        f"{threshold:.6f}"
+    )
+
+    inner_oof_metrics = calculate_metrics(inner_oof_labels, inner_oof_scores, threshold)
+    final_epochs = int(np.round(np.median(inner_best_epochs)))
+    final_epochs = max(1, final_epochs)
+    print(f"Outer Fold {fold}: "
+        f"inner best epochs = "
+        f"{inner_best_epochs}")
+    print( f"Outer Fold {fold}: "
+        f"final training epochs = "
+        f"{final_epochs}")
+    (final_model, final_history) = train_final_model(outer_train_idx=outer_train_idx, final_epochs=final_epochs)
+    test_loader = create_loader(outer_test_idx, shuffle=False)
+    (test_loss, test_labels, test_scores) = evaluate_model(final_model, test_loader)
+    test_predictions = (test_scores >= threshold).astype(np.int64)
+    test_metrics = calculate_metrics(test_labels, test_scores, threshold)
+    test_metrics.update({"fold":int(fold),"threshold":float(threshold),"test_loss":float(test_loss),"final_training_epochs":int(final_epochs),"n_outer_train":
+                int(len(outer_train_idx)),
+            "n_outer_test":
+                int(len(outer_test_idx)),
+            "n_outer_train_groups":
+                int(len(np.unique(groups[outer_train_idx]))),
+            "n_outer_test_groups":int(len(np.unique(groups[outer_test_idx])))})
+
+    print("\n" f"Outer Fold {fold} " f"test metrics:")
+    print(json.dumps(test_metrics, indent=2))
+    final_model_state = {key:value.detach().cpu().clone() for (key, value) in final_model.state_dict().items()}
+    del final_model
+    if device.type == "cuda":torch.cuda.empty_cache()
+    # Return everything required by Step 8
+    return {"fold":int(fold),
+        "outer_train_idx":np.asarray(outer_train_idx, dtype=np.int64),
+        "outer_test_idx":np.asarray(outer_test_idx, dtype=np.int64),
+        "threshold":float(threshold),
+        "inner_best_epochs":[int(x) for x in inner_best_epochs],
+        "final_epochs":int(final_epochs),
+        "inner_oof_labels":inner_oof_labels,
+        "inner_oof_scores":inner_oof_scores,
+        "inner_oof_metrics":inner_oof_metrics,
+        "inner_fold_information":inner_fold_information,
+        "final_history":final_history,
+        "test_loss":float(test_loss),
+        "test_labels":test_labels,
+        "test_scores":test_scores,
+        "test_predictions":test_predictions,
+        "test_metrics":test_metrics,
+        "model_state_dict":final_model_state}
+
+
+# Step 7:Five-fold cross-validation
+def run_five_fold_cv(output_dir):
+    number_groups = len(np.unique(groups))
+    if number_groups < N_FOLDS:
+        raise RuntimeError(
+            f"Only {number_groups} paired groups "
+            f"are available. "
+            f"At least {N_FOLDS} groups are required "
+            f"for {N_FOLDS}-fold cross-validation."
+        )
+    outer_splitter = StratifiedGroupKFold(n_splits=N_FOLDS, shuffle=False)
+    all_fold_metrics = []
+    for (fold, (outer_train_idx, outer_test_idx)) in enumerate(outer_splitter.split(np.zeros(len(samples)), labels, groups), start=1):
+        fold_result = train_one_fold(fold=fold, outer_train_idx=outer_train_idx, outer_test_idx=outer_test_idx)
+
+        # function is defined below.
+  
+        save_fold_results(fold_result=fold_result, output_dir=output_dir)
+        all_fold_metrics.append(fold_result["test_metrics"])
+        del fold_result
+    return all_fold_metrics
+
+# Step 8: Save results
+# ============================================================
+
+def save_split_samples(file_path, train_idx, test_idx):
+    with file_path.open("w", newline="") as file:
+        writer = csv.writer(file, delimiter="\t")
+        writer.writerow(["sample_id", "group_id", "label", "split", "path"])
+        for index in train_idx:
+            sample = samples[int(index)]
+            writer.writerow([sample["sample_id"], sample["group_id"], sample["label"], "outer_train", str(sample["path"])])
+        for index in test_idx:
+            sample = samples[int(index)]
+            writer.writerow([sample["sample_id"], sample["group_id"], sample["label"], "outer_test", str(sample["path"])])
+
+# Save one outer fold
+
+def save_fold_results(fold_result, output_dir):
+    fold = fold_result["fold"]
+    fold_dir = (output_dir / f"fold_{fold}")
+    fold_dir.mkdir(parents=True, exist_ok=True)
+    torch.save({"fold":int(fold), "model_state_dict":fold_result["model_state_dict"], "threshold":float(fold_result["threshold"]), "final_training_epochs":int(fold_result["final_epochs"]),
+            "model_parameters":{"seq_len":SEQ_LEN,
+                    "embed_dim":EMBED_DIM,
+                    "nb_filter1":args.nb_filter1,
+                    "nb_filter2":args.nb_filter2,
+                    "filter_len1":args.filter_len1,
+                    "filter_len2":args.filter_len2,
+                    "hidden":args.hidden,
+                    "dropout":args.dropout}},
+        fold_dir / "best_model.pt")
+
+    # Save final test metrics
+    with (fold_dir / "metrics.json").open("w") as file:
+        json.dump(fold_result["test_metrics"], file, indent=2)
+    with (fold_dir / "inner_oof_metrics.json").open("w") as file:
+        json.dump(fold_result["inner_oof_metrics"], file, indent=2)
+    with (fold_dir / "inner_cv_history.json").open("w") as file:
+        json.dump(fold_result["inner_fold_information"], file, indent=2)
+
+    # ========================================================
+    # Save outer train/test membership
+    # ========================================================
+
+    save_split_samples(file_path=fold_dir / "split_samples.tsv", train_idx=fold_result["outer_train_idx"], test_idx=fold_result["outer_test_idx"])
+
+    # ========================================================
+    # Save inner-CV OOF predictions
+    #
+    # These predictions are the basis for threshold selection.
+    # ========================================================
+
+    with (
+        fold_dir
+        /
+        "inner_oof_predictions.tsv"
+    ).open(
+        "w",
+        newline=""
+    ) as file:
+
+
+        writer = csv.writer(
+            file,
+            delimiter="\t"
+        )
+
+
+        writer.writerow(
+            [
+                "sample_id",
+                "group_id",
+                "label",
+                "score"
+            ]
+        )
+
+
+        for (
+            index,
+            label,
+            score
+        ) in zip(
+
+            fold_result[
+                "outer_train_idx"
+            ],
+
+            fold_result[
+                "inner_oof_labels"
+            ],
+
+            fold_result[
+                "inner_oof_scores"
+            ]
+
+        ):
+
+
+            sample = samples[
+                int(
+                    index
+                )
+            ]
+
+
+            writer.writerow(
+                [
+                    sample[
+                        "sample_id"
+                    ],
+
+                    sample[
+                        "group_id"
+                    ],
+
+                    int(
+                        label
+                    ),
+
+                    float(
+                        score
+                    )
+                ]
+            )
+
+
+    # ========================================================
+    # Save outer-test predictions
+    # ========================================================
+
+    with (
+        fold_dir
+        /
+        "test_predictions.tsv"
+    ).open(
+        "w",
+        newline=""
+    ) as file:
+
+
+        writer = csv.writer(
+            file,
+            delimiter="\t"
+        )
+
+
+        writer.writerow(
+            [
+                "sample_id",
+                "group_id",
+                "label",
+                "score",
+                "prediction",
+                "threshold"
+            ]
+        )
+
+
+        for (
+            index,
+            label,
+            score,
+            prediction
+        ) in zip(
+
+            fold_result[
+                "outer_test_idx"
+            ],
+
+            fold_result[
+                "test_labels"
+            ],
+
+            fold_result[
+                "test_scores"
+            ],
+
+            fold_result[
+                "test_predictions"
+            ]
+
+        ):
+
+
+            sample = samples[
+                int(
+                    index
+                )
+            ]
+
+
+            writer.writerow(
+                [
+                    sample[
+                        "sample_id"
+                    ],
+
+                    sample[
+                        "group_id"
+                    ],
+
+                    int(
+                        label
+                    ),
+
+                    float(
+                        score
+                    ),
+
+                    int(
+                        prediction
+                    ),
+
+                    float(
+                        fold_result[
+                            "threshold"
+                        ]
+                    )
+                ]
+            )
+
+# ============================================================
+# Step 8.2:
+# Calculate and save five-fold summary
+# ============================================================
+
+
+def save_cv_summary(
+    all_fold_metrics,
+    output_dir
+):
+
+    # --------------------------------------------------------
+    # Save raw fold metrics
+    # --------------------------------------------------------
+    with (
+        output_dir
+        /
+        "all_fold_metrics.json"
+    ).open(
+        "w"
+    ) as file:
+        json.dump(
+            all_fold_metrics,
+            file,
+            indent=2
+        )
+    # --------------------------------------------------------
+    # Metrics to summarize
+    # --------------------------------------------------------
+    metric_names = ["accuracy", "precision", "recall", "f1", "mcc", "auroc", "auprc", "threshold" ]
+    summary = {}
+    # ========================================================
+    # Mean +/- standard deviation across five OUTER test folds
+    # ========================================================
+    for metric_name in metric_names:
+        values = np.asarray([fold_metrics[metric_name] for fold_metrics in all_fold_metrics], dtype=np.float64)
+
+
+        summary[metric_name] = {"mean":float(
+                    np.mean(
+                        values
+                    )
+                ),
+
+            "sd":
+                float(
+                    np.std(
+                        values,
+                        ddof=1
+                    )
+                ),
+
+            "values":
+                [
+                    float(x)
+                    for x
+                    in values
+                ]
+        }
+
+
+    # --------------------------------------------------------
+    # Save summary JSON
+    # --------------------------------------------------------
+
+    with (output_dir / "summary.json").open("w") as file:
+        json.dump(summary, file, indent=2)
+    with (output_dir / "summary.tsv").open("w", newline="") as file:
+        writer = csv.writer(file, delimiter="\t")
+        writer.writerow(["metric", "fold_1", "fold_2", "fold_3", "fold_4", "fold_5", "mean", "sd"])
+        for metric_name in metric_names:
+            values = summary[metric_name]["values"]
+            writer.writerow([metric_name, *values, summary[metric_name]["mean"], summary[metric_name]["sd"]])
     
-    processed_data.append(embedding)
+    print("\n" "============================================================")
+    print("Five-fold outer-test performance")
+    print("============================================================")
+    for metric_name in metric_names:
+        print(
+            f"{metric_name}: "
+            f"{summary[metric_name]['mean']:.4f} "
+            f"+/- "
+            f"{summary[metric_name]['sd']:.4f}"
+        )
 
-# 现在可以使用 np.stack() 将处理后的数据转换为 NumPy 数组
-data = np.stack(processed_data)
-labels = np.array(labels)
+    return summary
+output_dir = Path(args.output_dir)
+output_dir.mkdir(parents=True, exist_ok=True)
+with (output_dir / "run_arguments.json").open("w") as file:
+    json.dump(vars(args), file, indent=2)
+all_fold_metrics = run_five_fold_cv(output_dir=output_dir)
+summary = save_cv_summary(all_fold_metrics=all_fold_metrics, output_dir=output_dir)
+
+
+print("\nTraining completed.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # Split data into training, validation, and test sets
 train_size = int(0.6 * len(data))
